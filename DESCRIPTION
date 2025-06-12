@@ -1,0 +1,13 @@
+Package: JSflex
+Title: Flexible Jolly-Seber Model Tools
+Version: 0.0.0.9000
+Authors@R: person("Your", "Name", email = "you@example.com", role = c("aut", "cre"))
+Description: Tools for fitting and simulating Jolly-Seber models with arbitrary state structures and mixed effects.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.2
+Imports:
+    dplyr,
+    tidyr,
+    corrplot
