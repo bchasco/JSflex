@@ -4,7 +4,7 @@
 \alias{make_param_vectors}
 \title{Create Parameter Vectors for Process}
 \usage{
-make_param_vectors(design, proc)
+make_param_vectors(design, processes = names(design$formulas))
 }
 \arguments{
 \item{design}{Output of `make_design_list_2()`.}

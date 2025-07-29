@@ -44,8 +44,8 @@ d <- read.csv("C:/R_packages/kale/data/NF_Lewis_combined-2013_2024-2025-04-18.cs
 ## 1.1  design matrices and flists  -------------
 ##-----------------------------------------------
 formulas <- list(
-  phi    = ~ 1 + f_sex + (1|f_tl),
-  p      = ~ 1,
+  phi    = ~ 1 + f_sex,
+  p      = ~ 1 + (1|f_tl),
   w      = ~ 1,
   v = ~ 1 , #deprecated for now
   t_var = ~ 1,
@@ -60,9 +60,16 @@ input <- list(
 
 design <- make_design_list_2(formulas, input, as.data.frame(d))
 
-data <- make_RTMB_data_list(design, d, state = my_state, period = "f_tk")
-params <- make_all_params(design, data)
+data <- make_RTMB_data_list(design, d, state = design$state, period = "f_tk")
+params <- make_param_vectors(design, d)
 random <- make_random(params)
+
+G <- max(lk$phi$lookup$g)
+S <- if (!is.null(design$state)) nlevels(d$f_tl) + 2 else 3L
+T <- max(lk$phi$lookup$time)
+
+S2 <- array(0, c(G, S, S, T))
+
 map <- make_map(params)
 #
 #

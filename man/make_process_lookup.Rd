@@ -2,56 +2,61 @@
 % Please edit documentation in R/utlis.R
 \name{make_process_lookup}
 \alias{make_process_lookup}
-\title{Build Lookup Table from Group-State-Time to Design Row}
+\title{Build Lookup Tables from Group-State-Time to Design Row for Multiple Processes}
 \usage{
-make_process_lookup(
-  proc,
-  design,
-  data,
-  state_var = "f_tl",
-  period_var = "f_tk"
-)
+make_process_lookup(procs, design, data, state_var = NULL, period_var = NULL)
 }
 \arguments{
-\item{proc}{Name of the process (e.g., "phi", "p", "w").}
+\item{procs}{Character vector of process names (e.g., c("phi","p")).}
 
-\item{design}{Output of `make_design_list_2()`.}
+\item{design}{Output of \code{make_design_list_2()}.}
 
 \item{data}{The original dataset.}
 
-\item{state_var}{String name of the state variable (e.g., "f_tl").}
+\item{state_var}{Optional string name of the state variable (e.g., "f_tl"); if \code{NULL}, a single alive state is assumed.}
 
-\item{period_var}{String name of the time variable (e.g., "f_tk").}
+\item{period_var}{String name of the time (period) variable (e.g., "f_tk").}
 }
 \value{
-A list with:
-- `lookup`: A `data.frame` with columns `g`, `state`, `time`, `design_row`, and `re_row`
-- `X_min`: Minimal fixed-effect design matrix
-- `Z_min`: Minimal random-effect design matrix (if applicable)
+A named list of length \code{length(procs)}, each element a list with:
+\describe{
+  \item{lookup}{data.frame with columns \code{g}, \code{state}, \code{time}, \code{design_row}, \code{re_row}}
+  \item{X_min}{Minimal fixed-effect design matrix for that process}
+  \item{Z_min}{Minimal random-effect design matrix for that process (if applicable)}
+}
 }
 \description{
-For a given process, generates a lookup table that maps combinations of
-group, state, and time to row indices in the minimal design matrix.
-This is required to populate full S2 or D2 arrays even when some
-combinations are unobserved. Also returns Z_min and re_row if random effects are used.
+For one or more model processes, generates lookup tables mapping combinations of
+group, state, and time to row indices in the minimal design matrices. Necessary
+for populating full S2 or D2 arrays even when some combinations are unobserved.
 }
 \examples{
 df <- data.frame(
   f_tk   = rep(1:5, each = 6),
-  f_tl   = factor(sample(c("A", "B", "C"), 30, replace = TRUE)),
-  f_yr   = factor(sample(2010:2012, 30, replace = TRUE)),
-  f_site = factor(sample(1:3, 30, replace = TRUE))
+  f_tl   = factor(sample(c("A", "B", "C"), 30, TRUE)),
+  f_yr   = factor(sample(2010:2012, 30, TRUE)),
+  f_site = factor(sample(1:3, 30, TRUE))
 )
 
-formulas <- list(
-  phi = ~ f_yr + (1|f_site),
-  p   = ~ 1
-)
+# 1a) fixed period effect
+formulas1 <- list(phi = ~ -1 + f_yr + f_tk)
+design1 <- make_design_list_2(formulas1, list(state="f_tl", input="f_tk"), df)
+res1 <- make_process_lookup("phi", design1, df, state_var="f_tl", period_var="f_tk")
 
-design <- make_design_list_2(formulas, list(state = "f_tl", input = "f_tk"), df)
-result <- make_process_lookup("phi", design, df, state_var = "f_tl", period_var = "f_tk")
-head(result$lookup)
-head(result$X_min)
-head(result$Z_min)
+# 1b) random period effect
+formulas2 <- list(phi = ~ -1 + f_yr + (1|f_tk))
+design2 <- make_design_list_2(formulas2, list(state="f_tl", input="f_tk"), df)
+res2 <- make_process_lookup("phi", design2, df, state_var="f_tl", period_var="f_tk")
+
+# 1c) interaction period effect
+formulas3 <- list(phi = ~ -1 + f_yr:f_tk)
+design3 <- make_design_list_2(formulas3, list(state="f_tl", input="f_tk"), df)
+res3 <- make_process_lookup("phi", design3, df, state_var="f_tl", period_var="f_tk")
+
+# multiple processes at once
+formulas_all <- list(phi=~f_yr+f_tl, p=~1)
+design_all <- make_design_list_2(formulas_all, list(state="f_tl", input="f_tk"), df)
+res_all <- make_process_lookup(c("phi","p"), design_all, df, state_var="f_tl", period_var="f_tk")
+str(res_all)
 
 }

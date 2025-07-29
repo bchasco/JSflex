@@ -56,6 +56,8 @@ make_process_lookup <- function(procs, design, data,
   for (proc in procs) {
     fml <- design$formulas[[proc]]
     txt <- paste(deparse(fml), collapse=" ")
+    has_time <- FALSE
+    has_state <- FALSE
     has_time  <- !is.null(period_var) && grepl(paste0("\\b",period_var,"\\b"), txt)
     has_state <- !is.null(state_var)  && grepl(paste0("\\b", state_var,"\\b"), txt)
 
@@ -65,7 +67,7 @@ make_process_lookup <- function(procs, design, data,
       "FALSE_FALSE" = design$group_excl_time_state[[proc]],
       "TRUE_FALSE"  = design$group_noperiod        [[proc]],
       "FALSE_TRUE"  = design$group_excl_time_state [[proc]],
-      "TRUE_TRUE"   = design$group_factor          [[proc]]
+      "TRUE_TRUE"   = design$group_excl_time_state[[proc]]
     )
     n_g <- nlevels(g_fac)
 
@@ -115,6 +117,7 @@ make_process_lookup <- function(procs, design, data,
   out
 }
 
+
 #' @title Create Parameter Vectors for Process
 #' @description
 #' For a given process name, extract the number of fixed and random effect parameters
@@ -148,20 +151,29 @@ make_process_lookup <- function(procs, design, data,
 make_param_vectors <- function(design, processes = names(design$formulas)) {
   beta <- list()
   u    <- list()
+  u_sd    <- list()
 
   for (proc in processes) {
     X <- design$X_group[[proc]]
     beta[[proc]] <- setNames(rep(0, ncol(X)), colnames(X))
-
+    if(proc=="w"){
+      beta[[proc]] <- setNames(rep(0.1, ncol(X)), colnames(X))
+    }
     Z <- design$Z_group[[proc]]
     if (!is.null(Z) && ncol(Z) > 0) {
-      u[[proc]] <- setNames(rep(0, ncol(Z)), paste0("u", seq_len(ncol(Z))))
+      if(proc %in% c("phi","p")){
+        u[[proc]] <- setNames(rep(0, ncol(Z)-2), paste0("u", 2:(ncol(Z)-2)))
+      }else{
+        u[[proc]] <- setNames(rep(0, ncol(Z)), paste0("u", seq_along(ncol(Z))))
+      }
+      u_sd[[proc]] <- unique(design$Z_terms[[proc]]$Lind) * 0
     } else {
       u[[proc]] <- numeric(0)
+      u_sd[[proc]] <- numeric(0)
     }
   }
 
-  list(beta = beta, u = u)
+  list(beta = beta, u = u, u_sd = u_sd)
 }
 
 #' @title Prepare Group-Based Predictors and Group-to-State Maps for Model Processes
@@ -1063,8 +1075,14 @@ plot_Sankey <- function(data) {
 #'
 #' @export
 make_random <- function(params) {
-  re_names <- c("u_phi", "u_p", "u_w", "u_v", "u_Nsuper", "u_t_var")
-  names(Filter(function(x) length(x) > 1, params[re_names]))
+  re_names <- c("phi", "p", "w", "v", "Nsuper", "t_var")
+  re_names <- names(Filter(function(x) length(x) > 1, params[re_names]))
+  if(length(re_names)>0){
+    re_names <- paste0("u_",re_names)
+  }else{
+    re_names <- c()
+  }
+  return(re_names)
 }
 
 
@@ -1351,13 +1369,21 @@ make_design_list_2 <- function(formulas, input, data) {
     group_noperiod        = list(),
     group_excl_time_state = list(),
     data                  = data,
-    state                 = input$state
+    state                 = input$state,
+    has_period            = list(),
+    has_state             = list()
   )
 
   for (proc in names(formulas)) {
     fml <- formulas[[proc]]
     if (length(fml) == 2)
       fml <- reformulate(deparse(fml[[2]]), response = "._dummy_response")
+
+    fml_txt <- paste(deparse(formulas[[proc]]), collapse=" ")
+    design_list$has_period[[proc]] <- grepl(paste0("\\b", input$input, "\\b"), fml_txt)
+    design_list$has_state[proc]  <- !is.null(input$state) &&
+      grepl(paste0("\\b", input$state, "\\b"), fml_txt)
+
 
     mf_full <- model.frame(lme4::subbars(fml), data)
     design_list$X_obs[[proc]] <- model.matrix(lme4::nobars(fml), mf_full)
@@ -1402,5 +1428,141 @@ make_design_list_2 <- function(formulas, input, data) {
                                 state_var = input$state)
   }
 
+
   design_list
 }
+
+#' Fit a Jolly–Seber (JS) model via TMB
+#'
+#' This is a high‐level wrapper that takes your raw capture–recapture data,
+#' a list of per‐process formulas, the names of your state and period variables,
+#' and then:
+#'   1. Builds the \code{design} object (via \code{make_design_list_2})
+#'   2. Constructs lookup tables (\code{make_process_lookup})
+#'   3. Builds and flattens parameter vectors (\code{make_param_vectors}, \code{make_random})
+#'   4. Assembles the data list for TMB (via \code{make_RTMB_data_list})
+#'   5. Instantiates and optimizes an AD‐fun via \code{RTMB::MakeADFun}
+#'
+#' @param df A data frame of summarized capture–recapture observations.
+#' @param formulas A named list of model formulas (one per process: e.g. \code{phi}, \code{p}, \code{w}, etc.).
+#' @param state_var Character, name of the state variable (or \code{NULL} if none).
+#' @param period_var Character, name of the period variable.
+#' @param map Optional named list for fixing or removing parameters (passed to \code{MakeADFun}).
+#' @param control Optional list of control parameters to pass to \code{MakeADFun}.
+#'
+#' @return A list with elements:
+#' \describe{
+#'   \item{\code{design}}{The output of \code{make_design_list_2()}.}
+#'   \item{\code{lookup}}{The per‐process lookup tables from \code{make_process_lookup()}.}
+#'   \item{\code{params}}{Flattened initial parameter vectors.}
+#'   \item{\code{random}}{Names of random‐effect parameters.}
+#'   \item{\code{obj}}{The TMB AD‐fun object.}
+#'   \item{\code{opt}}{Result of \code{nlminb()} optimization.}
+#'   \item{\code{report}}{Raw report from \code{obj\$report()}.}
+#'   \item{\code{sdreport}}{The TMB \code{sdreport} object.}
+#' }
+#'
+#' @examples
+#' \dontrun{
+#' library(dplyr)
+#' d <- read.csv("your_data.csv") %>%
+#'   mutate(
+#'     f_tk  = factor(Period),
+#'     f_tl  = factor(TagState),
+#'     t_k   = as.integer(f_tk),
+#'     r_k   = as.integer(RecapPeriod),
+#'     tag   = !is.na(TagID),
+#'     n     = 1L
+#'   ) %>%
+#'   group_by(f_tk, f_tl, t_k, r_k, tag) %>%
+#'   summarise(n = sum(n), .groups = "drop")
+#'
+#' formulas <- list(
+#'   phi    = ~ -1 + f_tl,
+#'   p      = ~  1,
+#'   w      = ~  1 + (1|f_tk),
+#'   t_var  = ~  1,
+#'   Nsuper = ~ -1 + f_tl
+#' )
+#'
+#' res <- fit_CJS_tmb(
+#'   df         = d,
+#'   formulas   = formulas,
+#'   state_var  = "f_tl",
+#'   period_var = "f_tk"
+#' )
+#'
+#' # inspect results
+#' summary(res$opt)
+#' head(res$report$psiPtot_g)
+#' }
+#'
+#' @export
+opt_tmb <- function(df,
+                    model,
+                        formulas,
+                        state_var  = NULL,
+                        period_var,
+                        map         = NULL,
+                        control     = list()) {
+  # 1) Design
+  design <- make_design_list_2(
+    formulas,
+    list(state = state_var, input = period_var),
+    df
+  )
+
+  # 2) Lookup tables
+  lk <- make_process_lookup(
+    names(design$formulas),
+    design, df,
+    state_var  = design$state,
+    period_var = period_var
+  )
+
+  # 3) Parameters + random effects
+  params_raw <- make_param_vectors(design, names(design$formulas))
+  random     <- make_random(params_raw$u)
+
+  # flatten into named numeric vectors
+  flatten_params <- function(params) {
+    out <- list()
+    for (grp in names(params)) {
+      for (nm in names(params[[grp]])) {
+        vec <- as.vector(params[[grp]][[nm]])
+        out[[ paste(grp, nm, sep = "_") ]] <- vec
+      }
+    }
+    as.list(out)
+  }
+  params <- flatten_params(params_raw)
+
+  # 4) Build TMB data list
+  data <- make_RTMB_data_list(design, df,
+                                   state  = design$state,
+                                   period = period_var)
+  data$lk <- lk
+
+  model <- source("model_2.3.r")
+  obj <- RTMB::MakeADFun(func = model$value,
+                         data = data,
+                         random = random,
+                         map = list(
+                           beta_t_var = as.factor(NA)),
+                         parameters = params)
+  # # # Optimize Model
+  opt <- nlminb(obj$par, obj$fn, obj$gr)
+  rep <- obj$report()
+  sdr <- sdreport(obj)
+  sd_val <- as.list(sdr, "Estimate", report = TRUE)
+  sd_sd <- as.list(sdr, "Std. Error", report = TRUE)
+
+  list(
+    data = data,
+    design   = design,
+    lookup   = lk,
+    params   = params,
+    random   = random
+  )
+}
+

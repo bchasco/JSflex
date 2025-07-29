@@ -1,0 +1,508 @@
+model <- function(parms) {
+
+  ## ------------------------------------------------------------------
+  ## 0.  unpack data & parameters  ------------------------------------
+  ## ------------------------------------------------------------------
+  RTMB::getAll(parms, data)
+
+  nll <- 0
+  nll_u_w <- nll_u_phi <- nll_u_p <- nll_u_v  <- nll_t_var <- 0
+
+  n_loc    <- if (!is.null(state)) length(unique(data[[state]])) else 1L
+  RTMB::REPORT(n_loc)
+
+  n_states <- 2 * n_loc + 1
+
+  fixup_array <- function(arr, has_period, has_state) {
+    # arr is G × S × S × T
+    G    <- dim(arr)[1]
+    S    <- dim(arr)[2]
+    T    <- dim(arr)[4]
+
+    if (!has_period) {
+      # replicate time‐1 across all times
+      # arr[,,,1] is G×S×S, drop the 4th dim
+      arr <- array(
+        rep(arr[,,,1, drop = FALSE], T),
+        dim = c(G, S, S, T)
+      )
+    }
+
+    if (!has_state) {
+      # replicate the [ ,1,1, ] “state‐1→state‐1” values
+      # into every [ ,s1,s2, ] slot
+      base  <- arr[, 1, 1, , drop = FALSE]           # G×1×1×T
+      arr   <- array(
+        rep(base, each = S*S),
+        dim = c(G, S, S, T)
+      )
+    }
+
+    arr
+  }
+
+  #
+  ## ------------------------------------------------------------------
+  get_XZ_group <- function(proc, data) {
+    if (!design$has_period[[proc]]) {
+      # — pull from the *obs* matrices and then reduce them —
+      X_obs <- design$X_obs[[proc]]
+      Z_obs <- design$Z_obs[[proc]]
+      gf    <- design$group_noperiod[[proc]]
+      # find one representative row per level of the no-period grouping:
+      rep_idx <- match(levels(gf), gf)
+      X_min <- X_obs[rep_idx, , drop = FALSE]
+      Z_min <- if (ncol(Z_obs)>0) Z_obs[rep_idx, , drop = FALSE] else Z_obs
+
+    } else {
+      # — full grouping: X_group/Z_group are *already* minimal —
+      X_min <- data$design$X_group[[proc]]
+      Z_min <- data$design$Z_group[[proc]]
+    }
+
+    list(X = X_min, Z = Z_min)
+  }
+
+  linpred <- function(xz, Z_obs, X_obs, beta, u, proc) {
+    z_names <- colnames(Z_obs)
+    x_names <- colnames(Z_obs)
+
+    eta <- 0
+    if (NCOL(xz$X)) eta <- eta + drop(xz$X %*% beta)
+
+    if(proc %in% c("p","phi")){
+      if (NCOL(xz$Z)) eta <- eta + drop(xz$Z[,colnames(xz$Z)%in%z_names] %*% c(0,u,0)) #don't estimate the first and last rand effect periods
+    }else{
+      if (NCOL(xz$Z)) eta <- eta + drop(xz$Z[,colnames(xz$Z)%in%z_names] %*% c(u))
+    }
+    eta                       # scalar
+  }
+
+  linpred2 <- function(lk, beta, u) {
+    eta <- 0
+    if (NCOL(lk$X)) eta <- eta + drop(lk$X %*% beta)
+    if (NCOL(lk$Z)) eta <- eta + drop(xz$Z %*% c(0,u,0))
+    eta                       # scalar
+  }
+
+  ## helper
+  linpred_period <- function(g, tt, X, Z,
+                                 phi_group, period_fac,
+                                 beta, u) {
+    row_id <- which(phi_group == g & period_fac == tt)[1]
+    eta <- 0
+    if (NCOL(X)) eta <- eta + drop(X[row_id, ] %*% beta)
+    if (NCOL(Z)) eta <- eta + drop(Z[row_id, ] %*% c(0,u,0))
+    eta
+  }
+
+  ## ------------------------------------------------------------------
+  ## design blocks -----------------------------------------------------
+  xz <- list(
+    phi     = get_XZ_group("phi",     data),
+    p       = get_XZ_group("p",       data),
+    w       = get_XZ_group("w",       data),
+    t_var       = get_XZ_group("t_var",       data),
+    Nsuper  = get_XZ_group("Nsuper",  data)
+  )
+  RTMB::REPORT(xz)
+
+  #
+  G_list <- list(
+    Gphi   = nlevels(design$group_noperiod[["phi"]]),
+    Gp     = nlevels(design$group_noperiod[["p"]]),
+    Gw     = nlevels(design$group_noperiod[["w"]]),
+    Gtvar  = nlevels(design$group_noperiod[["t_var"]])
+  )
+  RTMB::REPORT(G_list)
+  #
+  K    <- nrow(xz$Nsuper$X)
+  RTMB::REPORT(K)
+
+  G <- nlevels(joint_group)
+  RTMB::REPORT(G)
+
+  # icnt <- 1
+  # nll_t_var <- 0
+  # M <- array(0,c(1,n_loc,n_loc))
+  # if(!is.null(state)){
+  #   for (i in seq_len(n_loc-1)) {
+  #     for (j in i:n_loc) {
+  #       if (j > i) {
+  #         M[1,i, j] <- exp(-u_t_var[icnt])
+  #         icnt <- icnt + 1L
+  #       }
+  #     }
+  #     # diagonal
+  #     M[1,i, i] <- -sum(M[1,i, -i])
+  #   }
+  #   nll_t_var <-  - sum(dnorm(u_t_var,0, u_sd_t_var,TRUE))
+  # }
+  # RTMB::REPORT(M)
+  # RTMB::REPORT(u_t_var)
+
+  # --- Dimensions:
+  n_time      <- max(t_k, na.omit(r_k))
+
+  # --- Select the correct tiny-design for phi
+  eta_phi <- linpred(lk$phi, design$Z_obs$phi, design$X_obs$phi, beta_phi, u_phi, "phi")
+  print(length(eta_phi))
+
+  if(NCOL(lk$phi$Z_min)>1){
+    nll_u_phi <- -sum(dnorm(u_phi,0,exp(u_sd_phi),TRUE))
+    RTMB::REPORT(u_phi)
+    print(u_phi)
+  }
+  # --- Allocate S2
+  S2 <- array(0, dim = c(length(unique(lk$phi$lookup$g)), n_states, n_states, n_time))
+  for(i in 1:nrow(lk$phi$lookup)){
+    g <- lk$phi$lookup$g[i]       # 1st dim
+    ss <- lk$phi$lookup$state[i]   # 2nd dim
+    t <- lk$phi$lookup$time[i]   # 3rd dim (survival keeps you in the same state)
+    S2[g,ss,ss,t] <- -exp(eta_phi[i])
+    S2[g,ss,n_states,t] <- -sum(S2[g,ss,ss:(n_states-1),t])
+  }
+  for(t in 1:dim(S2)[4]){
+    for(ss in 1:n_loc){
+      for(g in 1:dim(S2)[1]){
+        if(!design$has_state[["phi"]]){
+          ss_ <- 1
+        }else{
+          ss_ <- ss
+        }
+        if(!design$has_period[["phi"]]){
+          t_ <- 1
+        }else{
+          t_ <- t
+        }
+        S2[g,ss,ss,t] <- S2[g,ss_,ss_,t_]
+        S2[g,ss,n_states,t] <- S2[g,ss_,n_states,t_]
+      }
+    }
+  }
+
+  for(g in 1:dim(S2)[1]){
+    for(t in 1:dim(S2)[4]){
+      S2[g,,,t] <- as.matrix(Matrix::expm(S2[g,,,t]))
+    }
+  }
+  RTMB::REPORT(S2)
+  RTMB::REPORT(eta_phi)
+
+
+
+  # --- Select the correct tiny-design for phi
+  eta_p <- linpred(lk$p, design$Z_obs$p, design$X_obs$p,  beta_p, u_p, "p")
+  # --- Allocate D2
+  D2 <- array(0, dim = c(length(unique(lk$p$lookup$g)), n_states, n_states, n_time))
+  for(i in 1:nrow(lk$p$lookup)){
+    g <- lk$p$lookup$g[i]       # 1st dim
+    ss <- lk$p$lookup$state[i]   # 2nd dim
+    t <- lk$p$lookup$time[i]   # 3rd dim (survival keeps you in the same state)
+    D2[g,ss,ss,t] <- -exp(eta_p[i])
+    D2[g,ss,n_loc+1,t] <- -(D2[g,ss,ss,t])
+  }
+  for(t in 1:dim(D2)[4]){
+    for(ss in 1:n_loc){
+      for(g in 1:dim(D2)[1]){
+        if(!design$has_state[["p"]]){
+          ss_ <- 1
+        }else{
+          ss_ <- ss
+        }
+        if(!design$has_period[["p"]]){
+          t_ <- 1
+        }else{
+          t_ <- t
+        }
+        D2[g,ss,ss,t] <- D2[g,ss_,ss_,t_]
+        D2[g,ss,ss+n_loc,t] <- D2[g,ss_,ss_+n_loc,t_]
+    }
+   }
+  }
+  for(t in 1:dim(D2)[4]){
+    for(g in 1:dim(D2)[1]){
+      D2[g,,,t] <- as.matrix(Matrix::expm(D2[g,,,t]))
+    }
+  }
+  if(NCOL(lk$p$Z_min)>1){
+    nll_u_p <- -sum(dnorm(u_p,0,exp(u_sd_p),TRUE))
+    RTMB::REPORT(u_p)
+  }
+  RTMB::REPORT(D2)
+  RTMB::REPORT(eta_p)
+
+  # --- Select the correct tiny-design for phi
+  eta_Nsuper <- linpred(lk$Nsuper, design$Z_obs$Nsuper, design$X_obs$Nsuper,  beta_Nsuper, u_Nsuper, "Nsuper")
+  Nsuper <- exp(eta_Nsuper)
+  RTMB::REPORT(eta_Nsuper)
+  RTMB::REPORT(Nsuper)
+
+  # w <- array(0, dim = c(length(unique(lk$w$lookup$g)), n_states, n_states, n_time))
+  # eta_w <- linpred(lk$w, design$Z_obs$w, design$X_obs$w, beta_w, u_w)
+  # for(i in 1:nrow(lk$w$lookup)){
+  #   g <- lk$w$lookup$g[i]       # 1st dim
+  #   ss <- lk$w$lookup$state[i]   # 2nd dim
+  #   t <- lk$w$lookup$time[i]   # 3rd dim (survival keeps you in the same state)
+  #   w[g,ss,ss,t] <- eta_w[i]
+  # }
+  # w <- fixup_array(
+  #   w,
+  #   has_period = design$has_period[["w"]],
+  #   has_state  = design$has_state[["w"]]
+  # )
+  # RTMB::REPORT(eta_w)
+  # RTMB::REPORT(w)
+
+  t_var <- array(0, dim = c(length(unique(lk$t_var$lookup$g)), n_states, n_states, n_time))
+  eta_t_var <- linpred(lk$t_var, design$Z_obs$t_var, design$X_obs$t_var, beta_t_var, u_t_var, "t_var")
+  for(i in 1:nrow(lk$t_var$lookup)){
+    g <- lk$t_var$lookup$g[i]       # 1st dim
+    ss <- lk$t_var$lookup$state[i]   # 2nd dim
+    t <- lk$t_var$lookup$time[i]   # 3rd dim (survival keeps you in the same state)
+    t_var[g,ss,ss,t] <- eta_t_var[i]
+    if(!design$has_period[["t_var"]]){
+      t_var[g,ss,ss,] <- t_var[g,ss,ss,1]
+    }
+  }
+  RTMB::REPORT(eta_t_var)
+  RTMB::REPORT(t_var)
+
+  CJS_nll <- numeric(length(t_k))
+  # Set default in case of no recapture
+  prob_rec <- numeric(length(t_k))
+  for (i in seq_along(t_k)) {
+
+    entry      <- t_k[i]
+    recapture  <- r_k[i]
+    is_tagged  <- tag[i]
+    count      <- n[i]
+
+    ## probability a detected fish was tagged (temporal-marking)
+    p_marked <- 1/17#v_w[entry]
+
+    ## seed alpha-vector
+    alpha      <- numeric(n_states)
+    idx_live   <- if (n_loc > 1) t_l[i] else 1L
+    alpha[idx_live] <- 1
+
+    #These are lookups for the groupings
+    # joint_group[1] is a factor, so coerce to character:
+    #The joint group is the grouping across all processes
+    this_joint <- as.character(joint_group[i])
+    # Get the group location for phi and p
+    g_phi <- phi_for_joint[match( this_joint, names(phi_for_joint) )]
+    g_p     <- p_for_joint[match( this_joint, names(p_for_joint) )]
+
+    ## transition kernel for this fish
+    Tmat <- as.matrix(S2[g_phi,,,t_k[i]]) %*% as.matrix(D2[g_p,,,t_k[i]])
+
+    for (t in seq(entry , s - 1)){
+      alpha <- alpha %*% Tmat
+      Tmat <- as.matrix(S2[g_phi,,,t]) %*% as.matrix(D2[g_p,,,t])
+    }
+    Tmat <- S2[g_phi,,,t+1] %*% D2[g_p,,,t+1]
+
+
+    # If recaptured, set detection index and extract from alpha
+    if(is_tagged){
+      if(n_loc>1){
+        if (!is.na(r_l[i])) { #recapture
+          idx_det <- if (n_loc > 1) n_loc + r_l[i] else n_loc + 1
+          if (idx_det > length(alpha) || idx_det < 1)
+            stop("idx_det out of bounds: ", idx_det)
+          prob_rec[i] <- alpha[idx_det]
+        } else { #tagged but never recovered
+          prob_rec[i] <- sum(alpha[ (n_loc + 1):(2 * n_loc) ])
+        }
+      }else{
+        prob_rec[i] <- alpha[2]
+      }
+    }
+
+    if (entry == s) prob_rec[i] <- 0
+    # print(paste(i, is_tagged, recapture))
+    ## ------------------- likelihood contributions -------------------
+    if (is_tagged) {
+      # CJS_nll[i] <- - dbinom(count, count,  p_marked, log = TRUE)
+      CJS_nll[i] <-  - dbinom( ifelse(is.na(recapture), 0, count),
+                           count, prob_rec[i], log = TRUE)
+      # print(CJS_nll[i])
+    } else {
+      # print("not tagged")
+      # CJS_nll[i] <- - dbinom(count, count, 1 - p_marked, log = TRUE)
+    }
+  }
+  RTMB::REPORT(CJS_nll)
+  RTMB::REPORT(prob_rec)
+
+  ## ------------------------------------------------------------------
+  ## 4.  calc_psi (unchanged – S,D,pent now already G-sized) ---------
+  ## ------------------------------------------------------------------
+  # print(G)
+  calc_psi <- function(Smat, Dmat, pent_mat, sp_pr, s, n_loc) {
+    G   <- nlevels(joint_group); n_states <- 2 * n_loc + 1
+    psiPtot_g <- numeric(G);
+    detect_mat <- matrix(0, G, s)
+
+    if (n_loc == 1) sp_pr <- 1 else sp_pr <- sp_pr
+
+    for (g in 1:G) {
+      if(nlevels(w_for_joint)>1){
+        # init_t <- min(combo_df$period[combo_df$group == w_for_joint[g]])
+      }else{
+        init_t <- 1
+      }
+
+      alpha <- numeric(n_states); alpha[1:n_loc] <- pent_mat[w_for_joint[g],init_t] * sp_pr
+      for (t in init_t:s) {
+        ## entrants during week t
+        for (j in 1:n_loc){
+          alpha[j] <- alpha[j] +
+            pent_mat[w_for_joint[g],t] * sp_pr[j] * (Smat[phi_for_joint[g],j,j,t] - 1) / log(Smat[phi_for_joint[g],j,j,t])
+        }
+        p_vec   <- Dmat[p_for_joint[g] , 1:n_loc , 1:n_loc + n_loc,t]
+        detect_mat[g,t] <- sum(alpha[1:n_loc] * p_vec)
+        alpha <- alpha %*% Smat[phi_for_joint[g],,,t] %*% Dmat[p_for_joint[g],,,t]
+      }
+      psiPtot_g[g] <- sum(detect_mat[g, ])
+    }
+    list(psiPtot_g=psiPtot_g, detect_mat=detect_mat)
+  }
+
+  has_fixed  <- NCOL(lk$w$X_min) > 0 && !all(colnames(lk$w$X_min) %in% "(Intercept)")
+  has_random <- NCOL(lk$w$Z_min) > 0
+  if(has_random){
+    nll_u_w <-  - sum(dnorm(u_w, 0, 1, log = TRUE))
+  }
+
+  # Build a full matrix with NA initially
+  delta_mat <- matrix(0, nrow = nlevels(design$group_noperiod[["w"]]), ncol = s)
+  w_group <- design$group_noperiod[["w"]]  # G_w groups
+
+  eta_w <- linpred(lk$w, design$Z_obs$w, design$X_obs$w,  beta_w, u_w, "w")
+
+  print(eta_w)
+  if (!has_fixed && !has_random) {
+    # truly uniform model: w ~ 1
+    pent_mat <- matrix(1/s, nlevels(w_group), s)
+  } else {
+    # Build linear predictor
+    # Xw <- lk$w$X_min
+    # Zw <- lk$w$Z_min
+    # eta_fixed <- if (has_fixed)  Xw %*% beta_w else 0
+    # if(NCOL(Zw)>0){
+    #   eta_random <- Zw %*% u_w
+    #   eta_w <- as.numeric(eta_fixed + eta_random)
+    #   u_uniform <- pnorm(eta_w)
+    #   delta_mat <- matrix(0, nrow = nlevels(w_group), ncol = s)
+    #
+    #   # Get u_uniform and eta_w with same length as combo_df$row
+      u_uniform  <- pnorm(eta_w)
+      delta_vals <- qgamma(u_uniform, shape = exp(u_sd_w), scale = 1)
+    #   # delta_vals <- exp(qnorm(u_uniform, 0, exp(u_sd_w)))
+    # }else{
+      # eta_w <- as.numeric(eta_fixed)
+      # delta_vals <- eta_w +
+    # }
+
+    for (i in 1:nrow(lk$w$lookup)) {
+      g <- lk$w$lookup$g[i]
+      t <- lk$w$lookup$time[i]
+      delta_mat[g, t] <- delta_vals[i]
+    }
+
+    for(t in 1:s){
+        for(g in length(w_for_joint)){
+          if(!design$has_period[["w"]]){
+            t_ <- 1
+          }else{
+            t_ <- t
+          }
+          delta_mat[g,t] <- delta_mat[g,t_]
+        }
+    }
+
+    # w <- fixup_array(
+    #   w,
+    #   has_period = design$has_period[["w"]],
+    #   has_state  = design$has_state[["w"]]
+    # )
+    # RTMB::REPORT(eta_w)
+    # RTMB::REPORT(w)
+
+    for(r in 1:nrow(delta_mat)){
+      delta_mat[r,] <- delta_mat[r,]/sum((delta_mat[r,]))
+    }
+    RTMB::REPORT(delta_mat)
+    pent_mat <- delta_mat
+  }
+  RTMB::REPORT(u_w)
+  RTMB::REPORT(pent_mat)
+
+  out_g <- calc_psi(S2, D2, pent_mat, sp_pr, s, n_loc)
+  psiPtot_g  <- out_g$psiPtot_g
+  RTMB::REPORT(psiPtot_g)
+  detect_mat <- out_g$detect_mat
+  RTMB::REPORT(detect_mat)
+
+  lambda_k <- Nsuper[Nsuper_for_joint] * psiPtot_g           # length K
+  RTMB::REPORT(lambda_k)
+  RTMB::REPORT(Nsuper)
+
+  ## ---------------------------------------------------------------
+  ## 2. group-wise total detections uTot_g -------------------------
+  uTot_g <- data.frame(n = n, joint_group = joint_group) %>%
+    group_by(joint_group) %>%
+    summarise(uTot = sum(n), .groups = "drop")
+  RTMB::REPORT(uTot_g)
+  ## make sure it has length K:
+  uTot_g_nll <- -sum(dpois(uTot_g$uTot, lambda_k, log = TRUE))
+  RTMB::REPORT(uTot_g_nll)
+
+  ## ---------------------------------------------------------------
+  ## 3. week × group counts  u_k_t  --------------------------------
+  ## Build k_idx via Nsuper_for_joint
+  ## Build observation matrix by joint group g × period t
+  u_g_t <- matrix(0, nrow = G, ncol = s)
+  for (i in seq_along(n)) {
+    g <- as.integer(joint_group[i])
+    t <- t_k[i]
+    u_g_t[g, t] <- u_g_t[g, t] + n[i]
+  }
+  RTMB::REPORT(u_g_t)
+
+
+  pars <- list(beta_phi = beta_phi,
+               beta_p = beta_p,
+               u_t_var = u_t_var)
+  RTMB::REPORT(pars)
+
+  ## Multinomial likelihood over each joint group g
+  uTot_g_t_nll <- 0
+  for (g in seq_len(G)) {
+
+    prob <- (detect_mat[g, ] + 1e-6)
+    prob <- prob / sum(prob)
+    uTot_g_t_nll <- uTot_g_t_nll - dmultinom(
+      x = u_g_t[g, ],
+      prob = prob,
+      log = TRUE
+    )
+  }
+
+  RTMB::REPORT(uTot_g_t_nll)
+
+  RTMB::ADREPORT(lambda_k)
+  RTMB::ADREPORT(pent_mat)
+
+  print(pent_mat)
+  print(sum(CJS_nll))
+  print(nll_u_w)
+  nll <- sum(CJS_nll)
+  nll <- nll + nll_u_w + nll_u_phi + nll_u_p + nll_u_v  + nll_t_var
+  nll <- nll + uTot_g_nll + uTot_g_t_nll
+  RTMB::REPORT(nll)
+
+  return(nll)
+}
